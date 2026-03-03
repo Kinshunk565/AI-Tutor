@@ -15,11 +15,15 @@ import { processResponse, computeOverallAbility, createInitialMastery, predictPe
 import { calibrateDifficulty } from '../lib/engine/difficultyCalibrator';
 import { detectWeakTopics, generateLearningPath } from '../lib/engine/patternDetector';
 import { generateQuestion, generateFeedback } from '../lib/api/questionGenerator';
-import { getProfile, saveProfile, clearSession } from '../lib/db';
+import { getProfile, saveProfile, clearSession, syncProfileToFirestore, loadProfileFromFirestore } from '../lib/db';
+import { useAuth } from '../lib/contexts/AuthContext';
+import { useRouter } from 'next/navigation';
 
 type View = 'dashboard' | 'quiz' | 'path' | 'analytics';
 
 export default function Home() {
+  const { user, loading: authLoading, logout } = useAuth();
+  const router = useRouter();
   const [profile, setProfile] = useState<StudentProfile | null>(null);
   const [view, setView] = useState<View>('dashboard');
   const [session, setSession] = useState<SessionState | null>(null);
@@ -35,15 +39,45 @@ export default function Home() {
   const [sessionComplete, setSessionComplete] = useState(false);
   const [previousQuestions, setPreviousQuestions] = useState<string[]>([]);
 
-  // Initialize
+  // Redirect to login if not authenticated
   useEffect(() => {
-    const topics = getAllTopics();
-    const topicIds = topics.map(t => t.id);
-    const p = getProfile(topicIds);
-    setProfile(p);
-    setWeakTopics(detectWeakTopics(p, topics));
-    setLearningPath(generateLearningPath(p, topics));
-  }, []);
+    if (!authLoading && !user) {
+      router.push('/login');
+    }
+  }, [authLoading, user, router]);
+
+  // Initialize — load from Firestore if available, else localStorage
+  useEffect(() => {
+    if (!user) return;
+    const init = async () => {
+      const topics = getAllTopics();
+      const topicIds = topics.map(t => t.id);
+      // Try loading from Firestore first
+      let p = await loadProfileFromFirestore(user.uid);
+      if (p) {
+        // Ensure all topics exist
+        let changed = false;
+        for (const topicId of topicIds) {
+          if (!p.masteryStates[topicId]) {
+            p.masteryStates[topicId] = createInitialMastery(topicId);
+            changed = true;
+          }
+        }
+        if (changed) {
+          saveProfile(p);
+          syncProfileToFirestore(user.uid, p);
+        }
+      } else {
+        p = getProfile(topicIds);
+      }
+      p.name = user.displayName || 'Student';
+      setProfile(p);
+      saveProfile(p);
+      setWeakTopics(detectWeakTopics(p, topics));
+      setLearningPath(generateLearningPath(p, topics));
+    };
+    init();
+  }, [user]);
 
   const updateAnalytics = useCallback((p: StudentProfile) => {
     const topics = getAllTopics();
@@ -149,6 +183,7 @@ export default function Home() {
 
     setProfile(updatedProfile);
     saveProfile(updatedProfile);
+    if (user) syncProfileToFirestore(user.uid, updatedProfile);
 
     // Update session
     const updatedSession: SessionState = {
@@ -214,7 +249,7 @@ export default function Home() {
     }
   };
 
-  if (!profile) {
+  if (authLoading || !user || !profile) {
     return (
       <div className="loading-container">
         <div className="spinner" />
@@ -259,6 +294,10 @@ export default function Home() {
             Analytics
           </button>
         </nav>
+        <div className="user-header-section">
+          <span className="user-greeting">👋 {user.displayName || user.email}</span>
+          <button className="logout-btn" onClick={logout}>Logout</button>
+        </div>
       </header>
 
       {/* Dashboard View */}
